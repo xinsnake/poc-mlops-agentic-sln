@@ -1,0 +1,31 @@
+# Secrets — never commit
+.env
+ml-pipeline/.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+
+# Local training artifacts (regeneratable by running the pipeline)
+ml-pipeline/data/
+ml-pipeline/mlruns/
+ml-pipeline/outputs/
+ml-pipeline/job.yml
+
+# Azure ML local cache
+.azureml/
+ml-pipeline/.azureml/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+

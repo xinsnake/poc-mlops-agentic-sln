@@ -1,0 +1,8 @@
+snowflake-connector-python==3.6.0
+python-dotenv==1.0.0
+pandas==2.2.0
+numpy==1.26.0
+scikit-learn==1.4.0
+lightgbm==4.3.0
+azure-ai-ml==1.13.0
+azure-identity==1.15.0
