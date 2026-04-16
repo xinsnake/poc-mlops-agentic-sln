@@ -178,6 +178,89 @@ Update `docs/implementation/20260410-ml-pipeline-spike.md` with:
 
 ---
 
+### Phase 1.2 — Fully AML-Native Pipeline (gating + registration + deployment on compute)
+*Move all orchestration logic into AML pipeline steps so nothing runs locally*
+
+**Current state (Phase 1):** `run_pipeline.py` runs locally. It submits training to AML compute, then locally reads metrics, applies gates, registers the model, and deploys. This means a human (or CI runner) must trigger it.
+
+**Goal:** Everything runs inside AML as pipeline steps. The pipeline can be scheduled directly in AML Studio with no external trigger.
+
+#### Why this matters
+- No dependency on a specific CI/CD platform (GitHub Actions, Azure DevOps, etc.)
+- Pipeline can be scheduled natively in AML Studio (e.g. weekly retrain)
+- Full lineage and auditability inside AML — every step is tracked
+- No local machine or CI runner needed
+
+#### Architecture change
+
+```
+Phase 1 (current):                          Phase 1.2 (target):
+
+LOCAL                   AML COMPUTE         AML COMPUTE (all steps)
+─────                   ───────────         ──────────────────────
+resolve data assets                         step 1: train
+submit training ──────► train.py            step 2: gate (read MLflow, check F1 ≥ 0.75)
+read metrics (MLflow)                       step 3: register model
+metric gate                                 step 4: champion/challenger gate
+register model                              step 5: deploy endpoint
+champion/challenger gate
+deploy endpoint
+```
+
+#### Implementation approach
+
+Each post-training step becomes a lightweight Python script that runs as an AML pipeline component:
+
+| Step | Script | What it does | Runs on |
+|------|--------|-------------|---------|
+| 1 | `src/train.py` (existing) | Train LightGBM, log metrics | AML compute |
+| 2 | `src/gate_metrics.py` (new) | Read MLflow metrics, check F1 threshold, output pass/fail | AML compute |
+| 3 | `src/register_model.py` (new) | Register model in registry if gate passed | AML compute |
+| 4 | `src/gate_champion.py` (new) | Compare new F1 vs production F1, output pass/fail | AML compute |
+| 5 | `src/deploy_model.py` (new) | Deploy to endpoint if champion gate passed | AML compute |
+
+**Key challenges:**
+- Gate scripts need `azure-ai-ml` SDK on compute to call MLClient (registration, deployment)
+- Deploy script needs credentials to manage the endpoint — the compute cluster's Managed Identity must have Contributor role on the workspace
+- Conditional execution: AML pipelines don't natively support "skip this step if previous step output = fail" — would need to handle via output flags and early-exit logic within each step
+- The custom environment (`conda.yml`) needs `azure-ai-ml` and `azure-identity` added
+
+#### 1.2a. add-gate-scripts
+**Create gate + registration + deployment scripts for AML compute**
+
+- `src/gate_metrics.py` — reads MLflow metrics for the current run, checks F1 threshold, writes `gate_result.json` with pass/fail + metrics
+- `src/register_model.py` — reads gate result, if passed registers model in registry, writes `registration_result.json` with model version
+- `src/gate_champion.py` — reads registration result, compares new F1 against deployed model's F1 tag, writes `champion_result.json`
+- `src/deploy_model.py` — reads champion result, if passed deploys model to endpoint
+
+Each script reads input from the previous step's output folder and writes its result for the next step.
+
+#### 1.2b. update-pipeline-definition
+**Update `run_pipeline.py` to chain all steps as AML pipeline components**
+
+- Define a component for each step (train → gate → register → champion → deploy)
+- Wire outputs from each step to inputs of the next
+- Submit entire pipeline as a single job — AML handles sequencing
+- `run_pipeline.py` becomes a thin submitter: build pipeline definition → submit → stream logs
+- No local logic after submission — everything happens on compute
+
+#### 1.2c. update-environment
+**Add `azure-ai-ml` and `azure-identity` to `conda.yml`**
+
+The gate/registration/deployment scripts need the AML SDK to make API calls from within the compute cluster.
+
+#### 1.2d. configure-compute-identity
+**Grant compute cluster's Managed Identity the required roles**
+
+- Contributor on the AML workspace (for model registration)
+- Contributor on the endpoint (for deployment)
+- Reader on MLflow tracking (for metric reading)
+
+#### 1.2e. update-docs-phase1-2
+**Document the fully AML-native pipeline**
+
+---
+
 ### Phase 2 — Hyperparameter Sweep
 *AML Sweep Job to automatically find optimal hyperparameters*
 
@@ -244,8 +327,9 @@ Add to implementation docs:
 ## Execution order
 
 ```
-Phase 1: mlflow-logging → extract-shared-helpers → create-pipeline → update-docs-phase1
-Phase 2: create-sweep → update-docs-phase2
-Phase 3: feature-importance → update-docs-phase3
+Phase 1:   mlflow-logging → extract-shared-helpers → create-pipeline → update-docs-phase1  ✅ DONE
+Phase 1.2: add-gate-scripts → update-pipeline-definition → update-environment → configure-compute-identity → update-docs-phase1-2
+Phase 2:   create-sweep → update-docs-phase2
+Phase 3:   feature-importance → update-docs-phase3
 ```
 

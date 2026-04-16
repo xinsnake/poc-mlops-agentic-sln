@@ -21,10 +21,8 @@ Flow:
 """
 
 import os
-import json
-import shutil
 import sys
-import tempfile
+import mlflow
 from dotenv import load_dotenv
 from azure.ai.ml import command, Input, Output, dsl
 from azure.ai.ml.constants import AssetTypes, InputOutputModes
@@ -76,7 +74,7 @@ def make_train_component():
 
 def get_job_metrics(ml_client, job_name: str) -> dict:
     """
-    Read metrics from a completed AML job by downloading the metrics.json artifact.
+    Read metrics from a completed AML job via the MLflow tracking API.
     Handles both pipeline jobs (navigates to child job) and standalone command jobs.
     """
     # Resolve the training child job for pipeline jobs
@@ -89,29 +87,21 @@ def get_job_metrics(ml_client, job_name: str) -> dict:
     else:
         run_id = job_name
 
-    # Download the metrics.json from the job's model_output
-    download_dir = tempfile.mkdtemp()
-    try:
-        ml_client.jobs.download(name=run_id, download_path=download_dir, output_name="model_output")
-        metrics_path = os.path.join(download_dir, "named-outputs", "model_output", "metrics.json")
+    # Read metrics via MLflow tracking API
+    tracking_uri = ml_client.workspaces.get(ml_client.workspace_name).mlflow_tracking_uri
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow_client = mlflow.tracking.MlflowClient()
 
-        if not os.path.exists(metrics_path):
-            # Fallback: search in default artifacts download
-            ml_client.jobs.download(name=run_id, download_path=download_dir)
-            for root, _dirs, files in os.walk(download_dir):
-                if "metrics.json" in files:
-                    metrics_path = os.path.join(root, "metrics.json")
-                    break
+    run = mlflow_client.get_run(run_id)
+    metrics = run.data.metrics
 
-        with open(metrics_path) as f:
-            data = json.load(f)
-        metrics = data.get("metrics", {})
-        print(f"\nTraining metrics (job: {run_id}):")
-        for k, v in sorted(metrics.items()):
-            print(f"  {k}: {v}")
-        return metrics
-    finally:
-        shutil.rmtree(download_dir, ignore_errors=True)
+    if not metrics:
+        raise RuntimeError(f"No metrics found for job {run_id}. Check train.py logged metrics via MLflow.")
+
+    print(f"\nTraining metrics (job: {run_id}):")
+    for k, v in sorted(metrics.items()):
+        print(f"  {k}: {v:.4f}")
+    return metrics
 
 
 def get_training_job_name(ml_client, pipeline_job_name: str) -> str:
